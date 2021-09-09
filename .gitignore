@@ -157,3 +157,5 @@ dmypy.json
 /tests/data/reward_models
 # Produced by examples/quickstart.sh
 /quickstart/
+
+/examples/quickstart/
