@@ -12,10 +12,12 @@ import numpy as np
 import torch as th
 import torch.utils.data as th_data
 import tqdm.autonotebook as tqdm
-from stable_baselines3.common import logger, policies, utils, vec_env
+from stable_baselines3.common import policies, utils, vec_env
 
+from imitation.algorithms import base as algo_base
 from imitation.data import rollout, types
-from imitation.policies import base
+from imitation.policies import base as policy_base
+from imitation.util import logger
 
 
 def reconstruct_policy(
@@ -170,7 +172,7 @@ class EpochOrBatchIteratorWithProgress:
                         return
 
 
-class BC:
+class BC(algo_base.BaseImitationAlgorithm):
 
     DEFAULT_BATCH_SIZE: int = 32
     """Default batch size for DataLoader automatically constructed from Transitions.
@@ -185,7 +187,7 @@ class BC:
         observation_space: gym.Space,
         action_space: gym.Space,
         *,
-        policy_class: Type[policies.BasePolicy] = base.FeedForward32Policy,
+        policy_class: Type[policies.BasePolicy] = policy_base.FeedForward32Policy,
         policy_kwargs: Optional[Mapping[str, Any]] = None,
         expert_data: Union[Iterable[Mapping], types.TransitionsMinimal, None] = None,
         optimizer_cls: Type[th.optim.Optimizer] = th.optim.Adam,
@@ -193,6 +195,7 @@ class BC:
         ent_weight: float = 1e-3,
         l2_weight: float = 0.0,
         device: Union[str, th.device] = "auto",
+        custom_logger: Optional[logger.HierarchicalLogger] = None,
     ):
         """Behavioral cloning (BC).
 
@@ -213,19 +216,25 @@ class BC:
             ent_weight: scaling applied to the policy's entropy regularization.
             l2_weight: scaling applied to the policy's L2 regularization.
             device: name/identity of device to place policy on.
+            custom_logger: Where to log to; if None (default), creates a new logger.
         """
+        super().__init__(custom_logger=custom_logger)
+
         if optimizer_kwargs:
             if "weight_decay" in optimizer_kwargs:
                 raise ValueError("Use the parameter l2_weight instead of weight_decay.")
+        self.tensorboard_step = 0
 
         self.action_space = action_space
         self.observation_space = observation_space
         self.policy_class = policy_class
         self.device = device = utils.get_device(device)
+        # Learning rate should be set via optimizer_kwargs, so hardcode lr here
+        # to force an error if self.policy.optimizer is used by mistake.
         self.policy_kwargs = dict(
             observation_space=self.observation_space,
             action_space=self.action_space,
-            lr_schedule=ConstantLRSchedule(),
+            lr_schedule=ConstantLRSchedule(th.finfo(th.float32).max),
         )
         self.policy_kwargs.update(policy_kwargs or {})
         self.device = utils.get_device(device)
@@ -234,7 +243,10 @@ class BC:
             self.device
         )  # pytype: disable=not-instantiable
         optimizer_kwargs = optimizer_kwargs or {}
-        self.optimizer = optimizer_cls(self.policy.parameters(), **optimizer_kwargs)
+        self.optimizer = optimizer_cls(
+            self.policy.parameters(),
+            **optimizer_kwargs,
+        )
 
         self.expert_data_loader: Optional[Iterable[Mapping]] = None
         self.ent_weight = ent_weight
@@ -325,10 +337,11 @@ class BC:
         n_batches: Optional[int] = None,
         on_epoch_end: Callable[[], None] = None,
         on_batch_end: Callable[[], None] = None,
-        log_interval: int = 100,
+        log_interval: int = 500,
         log_rollouts_venv: Optional[vec_env.VecEnv] = None,
         log_rollouts_n_episodes: int = 5,
         progress_bar: bool = True,
+        reset_tensorboard: bool = False,
     ):
         """Train with supervised learning for some number of epochs.
 
@@ -353,6 +366,9 @@ class BC:
             log_rollouts_n_episodes: Number of rollouts to generate when calculating
                 rollout stats. Non-positive number disables rollouts.
             progress_bar: If True, then show a progress bar during training.
+            reset_tensorboard: If True, then start plotting to Tensorboard from x=0
+                even if `.train()` logged to Tensorboard previously. Has no practical
+                effect if `.train()` is being called for the first time.
         """
         it = EpochOrBatchIteratorWithProgress(
             self.expert_data_loader,
@@ -362,6 +378,9 @@ class BC:
             on_batch_end=on_batch_end,
             progress_bar_visible=progress_bar,
         )
+
+        if reset_tensorboard:
+            self.tensorboard_step = 0
 
         batch_num = 0
         for batch, stats_dict_it in it:
@@ -374,7 +393,7 @@ class BC:
             if batch_num % log_interval == 0:
                 for stats in [stats_dict_it, stats_dict_loss]:
                     for k, v in stats.items():
-                        logger.record(k, v)
+                        self.logger.record(f"bc/{k}", v)
                 # TODO(shwang): Maybe instead use a callback that can be shared between
                 #   all algorithms' `.train()` for generating rollout stats.
                 #   EvalCallback could be a good fit:
@@ -383,15 +402,16 @@ class BC:
                     trajs = rollout.generate_trajectories(
                         self.policy,
                         log_rollouts_venv,
-                        rollout.min_episodes(log_rollouts_n_episodes),
+                        rollout.make_min_episodes(log_rollouts_n_episodes),
                     )
                     stats = rollout.rollout_stats(trajs)
-                    logger.record("batch_size", len(batch["obs"]))
+                    self.logger.record("batch_size", len(batch["obs"]))
                     for k, v in stats.items():
                         if "return" in k and "monitor" not in k:
-                            logger.record("rollout/" + k, v)
-                logger.dump(batch_num)
+                            self.logger.record("rollout/" + k, v)
+                self.logger.dump(self.tensorboard_step)
             batch_num += 1
+            self.tensorboard_step += 1
 
     def save_policy(self, policy_path: types.AnyPath) -> None:
         """Save policy to a path. Can be reloaded by `.reconstruct_policy()`.

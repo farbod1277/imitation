@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-set -e
-
 # Train PPO experts using reward models from experiments/imit_benchmark.sh
 
+set -e
+
+source experiments/common.env
+
 CONFIG_CSV="experiments/imit_benchmark_config.csv"
-TIMESTAMP=$(date --iso-8601=seconds)
 REWARD_MODELS_DIR="data/reward_models"
 LOG_ROOT="output/train_experts/${TIMESTAMP}"
 RESULTS_FILE="results.txt"
@@ -16,7 +17,7 @@ SEEDS="0 1 2"
 NEED_TEST_FILES="false"
 
 
-TEMP=$(getopt -o f -l fast,gail,airl,run_name:,log_root: -- $@)
+TEMP=$($GNU_GETOPT -o f -l fast,gail,airl,run_name:,log_root: -- $@)
 if [[ $? != 0 ]]; then exit 1; fi
 eval set -- "$TEMP"
 
@@ -24,8 +25,8 @@ while true; do
   case "$1" in
     # Fast mode (debug)
     -f | --fast)
-      CONFIG_CSV="tests/data/imit_benchmark_config.csv"
-      REWARD_MODELS_DIR="tests/data/reward_models"
+      CONFIG_CSV="tests/testdata/imit_benchmark_config.csv"
+      REWARD_MODELS_DIR="tests/testdata/reward_models"
       NEED_TEST_FILES="true"
       SEEDS="0"
       extra_configs+="fast "
@@ -62,7 +63,7 @@ done
 
 if [[ $NEED_TEST_FILES == "true" ]]; then
   # Generate quick reward models for test.
-  save_dir=tests/data/reward_models/${ALGORITHM}
+  save_dir=tests/testdata/reward_models/${ALGORITHM}
 
   # Wipe directories for writing later.
   if [[ -d ${save_dir} ]]; then

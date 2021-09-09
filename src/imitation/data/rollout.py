@@ -63,7 +63,9 @@ class TrajectoryAccumulator:
         """
         self.partial_trajectories[key].append(step_dict)
 
-    def finish_trajectory(self, key: Hashable = None) -> types.TrajectoryWithRew:
+    def finish_trajectory(
+        self, key: Hashable, terminal: bool
+    ) -> types.TrajectoryWithRew:
         """Complete the trajectory labelled with `key`.
 
         Args:
@@ -83,7 +85,7 @@ class TrajectoryAccumulator:
             key: np.stack(arr_list, axis=0)
             for key, arr_list in out_dict_unstacked.items()
         }
-        traj = types.TrajectoryWithRew(**out_dict_stacked)
+        traj = types.TrajectoryWithRew(**out_dict_stacked, terminal=terminal)
         assert traj.rews.shape[0] == traj.acts.shape[0] == traj.obs.shape[0] - 1
         return traj
 
@@ -124,8 +126,9 @@ class TrajectoryAccumulator:
         zip_iter = enumerate(zip(acts, obs, rews, dones, infos))
         for env_idx, (act, ob, rew, done, info) in zip_iter:
             if done:
-                # actual obs is inaccurate, so we use the one inserted into step info
-                # by stable baselines wrapper
+                # When dones[i] from VecEnv.step() is True, obs[i] is the first
+                # observation following reset() of the ith VecEnv, and
+                # infos[i]["terminal_observation"] is the actual final observation.
                 real_ob = info["terminal_observation"]
             else:
                 real_ob = ob
@@ -143,8 +146,10 @@ class TrajectoryAccumulator:
             )
             if done:
                 # finish env_idx-th trajectory
-                new_traj = self.finish_trajectory(env_idx)
+                new_traj = self.finish_trajectory(env_idx, terminal=True)
                 trajs.append(new_traj)
+                # When done[i] from VecEnv.step() is True, obs[i] is the first
+                # observation following reset() of the ith VecEnv.
                 self.add_step(dict(obs=ob), env_idx)
         return trajs
 
@@ -152,7 +157,7 @@ class TrajectoryAccumulator:
 GenTrajTerminationFn = Callable[[Sequence[types.TrajectoryWithRew]], bool]
 
 
-def min_episodes(n: int) -> GenTrajTerminationFn:
+def make_min_episodes(n: int) -> GenTrajTerminationFn:
     """Terminate after collecting n episodes of data.
 
     Arguments:
@@ -166,7 +171,7 @@ def min_episodes(n: int) -> GenTrajTerminationFn:
     return lambda trajectories: len(trajectories) >= n
 
 
-def min_timesteps(n: int) -> GenTrajTerminationFn:
+def make_min_timesteps(n: int) -> GenTrajTerminationFn:
     """Terminate at the first episode after collecting n timesteps of data.
 
     Arguments:
@@ -186,32 +191,51 @@ def min_timesteps(n: int) -> GenTrajTerminationFn:
 
 
 def make_sample_until(
-    n_timesteps: Optional[int],
-    n_episodes: Optional[int],
+    min_timesteps: Optional[int],
+    min_episodes: Optional[int],
 ) -> GenTrajTerminationFn:
-    """Returns a termination condition sampling until n_timesteps or n_episodes.
+    """Returns a termination condition sampling for a number of timesteps and episodes.
 
     Arguments:
-      n_timesteps: Minimum number of timesteps to sample.
-      n_episodes: Number of episodes to sample.
+        min_timesteps: Sampling will not stop until there are at least this many
+            timesteps.
+        min_episodes: Sampling will not stop until there are at least this many
+            episodes.
 
     Returns:
-      A termination condition.
+        A termination condition.
 
     Raises:
-      ValueError if both or neither of n_timesteps and n_episodes are set,
-      or if either are non-positive.
+        ValueError if neither of n_timesteps and n_episodes are set, or if either are
+            non-positive.
     """
-    if n_timesteps is not None and n_episodes is not None:
-        raise ValueError("n_timesteps and n_episodes were both set")
-    elif n_timesteps is not None:
-        assert n_timesteps > 0
-        return min_timesteps(n_timesteps)
-    elif n_episodes is not None:
-        assert n_episodes > 0
-        return min_episodes(n_episodes)
-    else:
-        raise ValueError("Set at least one of n_timesteps and n_episodes")
+    if min_timesteps is None and min_episodes is None:
+        raise ValueError(
+            "At least one of min_timesteps and min_episodes needs to be non-None"
+        )
+
+    conditions = []
+    if min_timesteps is not None:
+        if min_timesteps <= 0:
+            raise ValueError(
+                f"min_timesteps={min_timesteps} if provided must be positive"
+            )
+        conditions.append(make_min_timesteps(min_timesteps))
+
+    if min_episodes is not None:
+        if min_episodes <= 0:
+            raise ValueError(
+                f"min_episodes={min_episodes} if provided must be positive"
+            )
+        conditions.append(make_min_episodes(min_episodes))
+
+    def sample_until(trajs: Sequence[types.TrajectoryWithRew]) -> bool:
+        for cond in conditions:
+            if not cond(trajs):
+                return False
+        return True
+
+    return sample_until
 
 
 def generate_trajectories(
@@ -336,10 +360,20 @@ def rollout_stats(trajectories: Sequence[types.TrajectoryWithRew]) -> Dict[str, 
         "len": np.asarray([len(t.rews) for t in trajectories]),
     }
 
-    infos_peek = trajectories[0].infos
-    if infos_peek is not None and "episode" in infos_peek[-1]:
-        monitor_ep_returns = [t.infos[-1]["episode"]["r"] for t in trajectories]
+    monitor_ep_returns = []
+    for t in trajectories:
+        if t.infos is not None:
+            ep_return = t.infos[-1].get("episode", {}).get("r")
+            if ep_return is not None:
+                monitor_ep_returns.append(ep_return)
+    if monitor_ep_returns:
+        # Note monitor_ep_returns[i] may be from a different episode than ep_return[i]
+        # since we skip episodes with None infos. This is OK as we only return summary
+        # statistics, but you cannot e.g. compute the correlation between ep_return and
+        # monitor_ep_returns.
         traj_descriptors["monitor_return"] = np.asarray(monitor_ep_returns)
+        # monitor_return_len may be < n_traj when infos is sometimes missing
+        out_stats["monitor_return_len"] = len(traj_descriptors["monitor_return"])
 
     stat_names = ["min", "mean", "std", "max"]
     for desc_name, desc_vals in traj_descriptors.items():
@@ -385,7 +419,7 @@ def flatten_trajectories(
         parts["next_obs"].append(obs[1:])
 
         dones = np.zeros(len(traj.acts), dtype=bool)
-        dones[-1] = True
+        dones[-1] = traj.terminal
         parts["dones"].append(dones)
 
         if traj.infos is None:
@@ -430,7 +464,7 @@ def generate_transitions(
       `truncate` is provided as we collect data until the end of each episode.
     """
     traj = generate_trajectories(
-        policy, venv, sample_until=min_timesteps(n_timesteps), **kwargs
+        policy, venv, sample_until=make_min_timesteps(n_timesteps), **kwargs
     )
     transitions = flatten_trajectories_with_rew(traj)
     if truncate and n_timesteps is not None:
@@ -478,3 +512,25 @@ def rollout_and_save(
         logging.info(f"Rollout stats: {stats}")
 
     types.save(path, trajs)
+
+
+def compute_returns(rewards: np.ndarray, gamma: float) -> float:
+    """Calculate the discounted returns from an array of undiscounted rewards.
+
+    Args:
+        rewards: array of rewards, from the current time step (first)
+            to the last timestep (last).
+        gamma: the discount factor used for calculating returns.
+
+    Returns:
+        The discounted returns (the first reward is undiscounted,
+        i.e. we start at gamma^0)
+    """
+    # We want to calculate sum_{t = 0}^T gamma^t r_t, which can be
+    # interpreted as the polynomial sum_{t = 0}^T r_t x^t
+    # evaluated at x=gamma.
+    # Compared to first computing all the powers of gamma, then
+    # multiplying with the rewards and then summing, this method
+    # should require fewer computations and potentially be more
+    # numerically stable.
+    return np.polynomial.polynomial.polyval(gamma, rewards)

@@ -13,8 +13,8 @@ train_adversarial_ex = sacred.Experiment("train_adversarial", interactive=True)
 
 @train_adversarial_ex.config
 def train_defaults():
-    env_name = "CartPole-v1"  # environment to train on
-    total_timesteps = 1e5  # Num of environment transitions to sample
+    env_name = "seals/CartPole-v0"  # environment to train on
+    total_timesteps = 1e6  # Num of environment transitions to sample
     algorithm = "gail"  # Either "airl" or "gail"
 
     n_expert_demos = None  # Num demos used. None uses every demo possible
@@ -50,7 +50,6 @@ def train_defaults():
 
     log_root = os.path.join("output", "train_adversarial")  # output directory
     checkpoint_interval = 0  # Num epochs between checkpoints (<0 disables)
-    init_tensorboard = False  # If True, then write Tensorboard logs
     rollout_hint = None  # Used to generate default rollout_path
     data_dir = "data/"  # Default data directory
 
@@ -119,6 +118,7 @@ ANT_SHARED_LOCALS = dict(
 @train_adversarial_ex.named_config
 def acrobot():
     env_name = "Acrobot-v1"
+    algorithm_kwargs = {"shared": {"allow_variable_horizon": True}}
     rollout_hint = "acrobot"
 
 
@@ -126,20 +126,23 @@ def acrobot():
 def cartpole():
     env_name = "CartPole-v1"
     rollout_hint = "cartpole"
-    discrim_net_kwargs = {"gail": {"scale": False}}
+    algorithm_kwargs = {"shared": {"allow_variable_horizon": True}}
+    discrim_net_kwargs = {"gail": {"normalize_images": False}}
 
 
 @train_adversarial_ex.named_config
 def seals_cartpole():
+    total_timesteps = 1.4e6
     env_name = "seals/CartPole-v0"
     # seals and vanilla CartPole have the same expert trajectories.
     rollout_hint = "cartpole"
-    discrim_net_kwargs = {"gail": {"scale": False}}
+    discrim_net_kwargs = {"gail": {"normalize_images": False}}
 
 
 @train_adversarial_ex.named_config
 def mountain_car():
     env_name = "MountainCar-v0"
+    algorithm_kwargs = {"shared": {"allow_variable_horizon": True}}
     rollout_hint = "mountain_car"
 
 
@@ -159,33 +162,67 @@ def pendulum():
 
 
 @train_adversarial_ex.named_config
-def ant():
+def seals_ant():
     locals().update(**MUJOCO_SHARED_LOCALS)
     locals().update(**ANT_SHARED_LOCALS)
-    env_name = "Ant-v2"
+    env_name = "seals/Ant-v0"
     rollout_hint = "ant"
 
 
-@train_adversarial_ex.named_config
-def half_cheetah():
-    locals().update(**MUJOCO_SHARED_LOCALS)
-    env_name = "HalfCheetah-v2"
-    rollout_hint = "half_cheetah"
-    total_timesteps = 2e6
+HALF_CHEETAH_SHARED_LOCALS = dict(
+    env_name="HalfCheetah-v2",
+    rollout_hint="half_cheetah",
+    gen_batch_size=16384,
+    init_rl_kwargs=dict(
+        batch_size=1024,
+    ),
+    algorithm_kwargs=dict(
+        shared=dict(
+            # Number of discriminator updates after each round of generator updates
+            n_disc_updates_per_round=16,
+            # Equivalent to no replay buffer if batch size is the same
+            gen_replay_buffer_capacity=16384,
+            expert_batch_size=8192,
+        ),
+        airl=dict(
+            reward_net_kwargs=dict(
+                reward_hid_sizes=(32,),
+                potential_hid_sizes=(32,),
+            ),
+        ),
+    ),
+)
 
 
 @train_adversarial_ex.named_config
-def hopper():
+def half_cheetah_gail():
+    # TODO(shwang): Update experiment scripts to use different total_timesteps
+    # for GAIL and AIRL
     locals().update(**MUJOCO_SHARED_LOCALS)
-    # TODO(adam): upgrade to Hopper-v3?
-    env_name = "Hopper-v2"
+    locals().update(**HALF_CHEETAH_SHARED_LOCALS)
+    algorithm = "gail"
+    total_timesteps = 8e6
+
+
+@train_adversarial_ex.named_config
+def half_cheetah_airl():
+    locals().update(**MUJOCO_SHARED_LOCALS)
+    locals().update(**HALF_CHEETAH_SHARED_LOCALS)
+    algorithm = "airl"
+    total_timesteps = 5e6
+
+
+@train_adversarial_ex.named_config
+def seals_hopper():
+    locals().update(**MUJOCO_SHARED_LOCALS)
+    env_name = "seals/Hopper-v0"
     rollout_hint = "hopper"
 
 
 @train_adversarial_ex.named_config
-def humanoid():
+def seals_humanoid():
     locals().update(**MUJOCO_SHARED_LOCALS)
-    env_name = "Humanoid-v2"
+    env_name = "seals/Humanoid-v0"
     rollout_hint = "humanoid"
     total_timesteps = 4e6
 
@@ -193,21 +230,22 @@ def humanoid():
 @train_adversarial_ex.named_config
 def reacher():
     env_name = "Reacher-v2"
+    algorithm_kwargs = {"shared": {"allow_variable_horizon": True}}
     rollout_hint = "reacher"
 
 
 @train_adversarial_ex.named_config
-def swimmer():
+def seals_swimmer():
     locals().update(**MUJOCO_SHARED_LOCALS)
-    env_name = "Swimmer-v2"
+    env_name = "seals/Swimmer-v0"
     rollout_hint = "swimmer"
     total_timesteps = 2e6
 
 
 @train_adversarial_ex.named_config
-def walker():
+def seals_walker():
     locals().update(**MUJOCO_SHARED_LOCALS)
-    env_name = "Walker2d-v2"
+    env_name = "seals/Walker2d-v0"
     rollout_hint = "walker"
 
 

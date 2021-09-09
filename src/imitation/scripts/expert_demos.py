@@ -38,7 +38,6 @@ def rollouts_and_policy(
     rollout_save_n_episodes: Optional[int],
     policy_save_interval: int,
     policy_save_final: bool,
-    init_tensorboard: bool,
 ) -> dict:
     """Trains an expert policy from scratch and saves the rollouts and policy.
 
@@ -92,9 +91,6 @@ def rollouts_and_policy(
         policy_save_final: If True, then save the policy right after training is
             finished.
 
-        init_tensorboard: If True, then write tensorboard logs to {log_dir}/sb_tb
-            and "output/summary/...".
-
     Returns:
       The return value of `rollout_stats()` using the final policy.
     """
@@ -104,10 +100,10 @@ def rollouts_and_policy(
     sample_until = rollout.make_sample_until(
         rollout_save_n_timesteps, rollout_save_n_episodes
     )
-    eval_sample_until = rollout.min_episodes(n_episodes_eval)
+    eval_sample_until = rollout.make_min_episodes(n_episodes_eval)
 
     logging.basicConfig(level=logging.INFO)
-    logger.configure(
+    custom_logger = logger.configure(
         folder=osp.join(log_dir, "rl"), format_strs=["tensorboard", "stdout"]
     )
 
@@ -115,16 +111,6 @@ def rollouts_and_policy(
     policy_dir = osp.join(log_dir, "policies")
     os.makedirs(rollout_dir, exist_ok=True)
     os.makedirs(policy_dir, exist_ok=True)
-
-    if init_tensorboard:
-        # sb_tensorboard_dir = osp.join(log_dir, "sb_tb")
-        # Convert sacred's ReadOnlyDict to dict so we can modify on next line.
-        init_rl_kwargs = dict(init_rl_kwargs)
-        # init_rl_kwargs["tensorboard_log"] = sb_tensorboard_dir
-        # FIXME(sam): this is another hack to prevent SB3 from configuring the
-        # logger on the first .learn() call. Remove it once SB3 issue #109 is
-        # fixed.
-        init_rl_kwargs["tensorboard_log"] = None
 
     venv = util.make_vec_env(
         env_name,
@@ -156,6 +142,7 @@ def rollouts_and_policy(
     callback = callbacks.CallbackList(callback_objs)
 
     policy = util.init_rl(venv, verbose=1, **init_rl_kwargs)
+    policy.set_logger(custom_logger)
     policy.learn(total_timesteps, callback=callback)
 
     # Save final artifacts after training is complete.

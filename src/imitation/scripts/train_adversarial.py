@@ -49,7 +49,6 @@ def train_adversarial(
     log_dir: str,
     total_timesteps: int,
     n_episodes_eval: int,
-    init_tensorboard: bool,
     checkpoint_interval: int,
     gen_batch_size: int,
     init_rl_kwargs: Mapping,
@@ -88,7 +87,6 @@ def train_adversarial(
             during training.
         n_episodes_eval: The number of episodes to average over when calculating
             the average episode reward of the imitation policy for return.
-        init_tensorboard: If True, then write tensorboard logs to `{log_dir}/sb_tb`.
         checkpoint_interval: Save the discriminator and generator models every
             `checkpoint_interval` rounds and after training is complete. If 0,
             then only save weights after training is complete. If <0, then don't
@@ -153,8 +151,7 @@ def train_adversarial(
 
     total_timesteps = int(total_timesteps)
 
-    logging.info("Logging to %s", log_dir)
-    logger.configure(log_dir, ["tensorboard", "stdout"])
+    custom_logger = logger.configure(log_dir, ["tensorboard", "stdout"])
     os.makedirs(log_dir, exist_ok=True)
     sacred_util.build_sacred_symlink(log_dir, _run)
 
@@ -167,16 +164,7 @@ def train_adversarial(
         max_episode_steps=max_episode_steps,
     )
 
-    # if init_tensorboard:
-    #     tensorboard_log = osp.join(log_dir, "sb_tb")
-    # else:
-    #     tensorboard_log = None
-
     gen_algo = util.init_rl(
-        # FIXME(sam): ignoring tensorboard_log is a hack to prevent SB3 from
-        # re-configuring the logger (SB3 issue #109). See init_rl() for details.
-        # TODO(shwang): Let's get rid of init_rl after SB3 issue #109 is fixed?
-        # Besides sidestepping #109, init_rl is just a stub function.
         venv,
         **init_rl_kwargs,
     )
@@ -205,7 +193,14 @@ def train_adversarial(
         gen_algo=gen_algo,
         log_dir=log_dir,
         discrim_kwargs=final_discrim_kwargs,
+        custom_logger=custom_logger,
         **final_algorithm_kwargs,
+    )
+
+    logging.info(f"Discriminator network summary:\n {trainer.discrim_net}")
+    logging.info(f"RL algorithm: {type(trainer.gen_algo)}")
+    logging.info(
+        f"Imitation (generator) policy network summary:\n" f"{trainer.gen_algo.policy}"
     )
 
     def callback(round_num):
@@ -220,7 +215,7 @@ def train_adversarial(
 
     # Final evaluation of imitation policy.
     results = {}
-    sample_until_eval = rollout.min_episodes(n_episodes_eval)
+    sample_until_eval = rollout.make_min_episodes(n_episodes_eval)
     trajs = rollout.generate_trajectories(
         trainer.gen_algo, trainer.venv_train, sample_until=sample_until_eval
     )

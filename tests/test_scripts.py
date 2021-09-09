@@ -6,7 +6,11 @@ experiment implicitly sets parallel=False.
 """
 
 import collections
+import filecmp
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -25,6 +29,8 @@ from imitation.scripts import (
     parallel,
     train_adversarial,
     train_bc,
+    train_dagger,
+    train_preference_comparisons,
 )
 
 ALL_SCRIPTS_MODS = [
@@ -34,9 +40,11 @@ ALL_SCRIPTS_MODS = [
     parallel,
     train_adversarial,
     train_bc,
+    train_dagger,
+    train_preference_comparisons,
 ]
 
-CARTPOLE_TEST_DATA_PATH = pathlib.Path("tests/data/expert_models/cartpole_0/")
+CARTPOLE_TEST_DATA_PATH = pathlib.Path("tests/testdata/expert_models/cartpole_0/")
 CARTPOLE_TEST_ROLLOUT_PATH = CARTPOLE_TEST_DATA_PATH / "rollouts/final.pkl"
 CARTPOLE_TEST_POLICY_PATH = CARTPOLE_TEST_DATA_PATH / "policies/final"
 
@@ -61,9 +69,39 @@ def test_main_console(script_mod):
         script_mod.main_console()
 
 
+def test_train_preference_comparisons_main(tmpdir):
+    run = train_preference_comparisons.train_preference_comparisons_ex.run(
+        named_configs=["cartpole", "fast"], config_updates=dict(log_root=tmpdir)
+    )
+    assert run.status == "COMPLETED"
+    assert isinstance(run.result, dict)
+
+
+def test_train_dagger_main(tmpdir):
+    with pytest.warns(None) as record:
+        run = train_dagger.train_dagger_ex.run(
+            named_configs=["cartpole", "fast"],
+            config_updates=dict(
+                log_root=tmpdir,
+                expert_data_src=CARTPOLE_TEST_ROLLOUT_PATH,
+                expert_policy_path=CARTPOLE_TEST_POLICY_PATH,
+                expert_policy_type="ppo",
+            ),
+        )
+    for warning in record:
+        # PyTorch wants writeable arrays.
+        # See https://github.com/HumanCompatibleAI/imitation/issues/219
+        assert not (
+            warning.category == UserWarning
+            and "NumPy array is not writeable" in warning.message.args[0]
+        )
+    assert run.status == "COMPLETED"
+    assert isinstance(run.result, dict)
+
+
 def test_train_bc_main(tmpdir):
     run = train_bc.train_bc_ex.run(
-        named_configs=["fast", "cartpole"],
+        named_configs=["cartpole", "fast"],
         config_updates=dict(
             log_root=tmpdir,
             expert_data_src=CARTPOLE_TEST_ROLLOUT_PATH,
@@ -92,7 +130,7 @@ def test_expert_demos_rollouts_from_policy(tmpdir):
         named_configs=["cartpole", "fast"],
         config_updates=dict(
             log_root=tmpdir,
-            rollout_save_path=str(pathlib.Path(tmpdir, "rollouts", "test.pkl")),
+            rollout_save_path=str(pathlib.Path(tmpdir, "rollouts", "test.zip")),
             policy_path=CARTPOLE_TEST_POLICY_PATH,
         ),
     )
@@ -150,7 +188,6 @@ def test_train_adversarial(tmpdir):
     config_updates = {
         "log_root": tmpdir,
         "rollout_path": CARTPOLE_TEST_ROLLOUT_PATH,
-        "init_tensorboard": True,
     }
     run = train_adversarial.train_adversarial_ex.run(
         named_configs=named_configs,
@@ -427,11 +464,12 @@ def test_analyze_imitation(tmpdir: str, run_names: List[str], run_sacred_fn):
         run = analyze.analysis_ex.run(
             command_name="analyze_imitation",
             config_updates=dict(
-                source_dir=sacred_logs_dir,
+                source_dirs=[sacred_logs_dir],
                 env_name="CartPole-v1",
                 run_name=run_name,
                 csv_output_path=tmpdir / "analysis.csv",
-                verbose=True,
+                tex_output_path=tmpdir / "analysis.tex",
+                print_table=True,
             ),
         )
         assert run.status == "COMPLETED"
@@ -456,9 +494,28 @@ def test_analyze_gather_tb(tmpdir: str):
     run = analyze.analysis_ex.run(
         command_name="gather_tb_directories",
         config_updates=dict(
-            source_dir=tmpdir,
+            source_dirs=[tmpdir],
         ),
     )
     assert run.status == "COMPLETED"
     assert isinstance(run.result, dict)
     assert run.result["n_tb_dirs"] == 2
+
+
+def test_convert_trajs_in_place(tmpdir: str):
+    shutil.copy(CARTPOLE_TEST_ROLLOUT_PATH, tmpdir)
+    tmp_path = os.path.join(tmpdir, os.path.basename(CARTPOLE_TEST_ROLLOUT_PATH))
+    exit_code = subprocess.call(
+        ["python", "-m", "imitation.scripts.convert_trajs_in_place", tmp_path]
+    )
+    assert exit_code == 0
+
+    shutil.copy(tmp_path, tmp_path + ".new")
+    exit_code = subprocess.call(
+        ["python", "-m", "imitation.scripts.convert_trajs_in_place", tmp_path]
+    )
+    assert exit_code == 0
+
+    assert filecmp.cmp(
+        tmp_path, tmp_path + ".new"
+    ), "convert_trajs_in_place not idempotent"

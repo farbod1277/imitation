@@ -7,17 +7,19 @@ set -e
 # The benchmark tasks are defined in the CSV config file
 # `experiments/imit_benchmark_config.csv`.
 
+source experiments/common.env
+
 CONFIG_CSV="experiments/imit_benchmark_config.csv"
-EXPERT_MODELS_DIR="data/expert_models"
-TIMESTAMP=$(date --iso-8601=seconds)
+DATA_DIR="${DATA_DIR:-data/}"
 LOG_ROOT="output/imit_benchmark/${TIMESTAMP}"
 extra_configs=""
 extra_options=""
+extra_parallel_options=""
 ALGORITHM="gail"
 
-SEEDS="0 1 2"
+SEEDS="0 1 2 3 4"
 
-TEMP=$(getopt -o f -l fast,gail,airl,run_name:,log_root:,file_storage: -- $@)
+TEMP=$($GNU_GETOPT -o f,T -l fast,gail,airl,mvp_seals,cheetah,tmux,pdb,run_name:,log_root:,file_storage:,echo -- $@)
 if [[ $? != 0 ]]; then exit 1; fi
 eval set -- "$TEMP"
 
@@ -25,10 +27,21 @@ while true; do
   case "$1" in
     # Fast mode (debug)
     -f | --fast)
-      CONFIG_CSV="tests/data/imit_benchmark_config.csv"
-      EXPERT_MODELS_DIR="tests/data/expert_models"
+      CONFIG_CSV="tests/testdata/imit_benchmark_config.csv"
       SEEDS="0"
       extra_configs+="fast "
+      shift
+      ;;
+    --mvp_seals)
+      CONFIG_CSV="experiments/imit_table_mvp_seals_config.csv"
+      shift
+      ;;
+    --cheetah)
+      CONFIG_CSV="experiments/imit_table_cheetahs.csv"
+      shift
+      ;;
+    -T | --tmux)
+      extra_parallel_options+="--tmux "
       shift
       ;;
     --gail)
@@ -48,9 +61,20 @@ while true; do
       shift 2
       ;;
     --file_storage)
-      # Used by `tests/generate_test_data.sh` to save Sacred logs in tests/data.
+      # Used by `tests/generate_test_data.sh` to save Sacred logs in tests/testdata.
       extra_options+="--file_storage $2 "
       shift 2
+      ;;
+    --pdb)
+      echo 'NOTE: Interact with PDB session via tmux. If an error occurs, `parallel` '
+      echo 'will hang and wait for user input in tmux session.'
+      extra_parallel_options+="--tmux "  # Needed for terminal output.
+      extra_options+="--pdb "
+      shift
+      ;;
+    --echo)
+      extra_parallel_options+="echo "
+      shift
       ;;
     --)
       shift
@@ -67,26 +91,26 @@ mkdir -p "${LOG_ROOT}"
 echo "Logging to: ${LOG_ROOT}"
 
 parallel -j 25% --header : --results ${LOG_ROOT}/parallel/ --colsep , --progress \
+  ${extra_parallel_options} \
   python -m imitation.scripts.train_adversarial \
   --capture=sys \
   ${extra_options} \
   with \
   ${ALGORITHM} \
-  ${extra_configs} \
   {env_config_name} \
   log_dir="${LOG_ROOT}/{env_config_name}_{seed}/n_expert_demos_{n_expert_demos}" \
-  gen_batch_size={gen_batch_size} \
-  rollout_path=${EXPERT_MODELS_DIR}/{env_config_name}_0/rollouts/final.pkl \
+  data_dir=${DATA_DIR} \
   checkpoint_interval=0 \
   n_expert_demos={n_expert_demos} \
   seed={seed} \
+  ${extra_configs} \
   :::: $CONFIG_CSV \
   ::: seed ${SEEDS}
 
 # Directory path is really long. Enter the directory to shorten results output,
 # which includes directory of each stdout file.
 pushd ${LOG_ROOT}/parallel
-find . -name stdout | sort | xargs tail -n 15 | grep -E '==|\[result\]'
+find . -name stdout | sort | xargs tail -n 15 | grep -E '==|Result'
 popd
 
 echo "[Optional] Upload new reward models to S3 (replacing old ones) using the commands:"

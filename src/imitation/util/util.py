@@ -17,8 +17,9 @@ from typing import (
 import gym
 import numpy as np
 import stable_baselines3
+import torch as th
 from gym.wrappers import TimeLimit
-from stable_baselines3.common import monitor
+from stable_baselines3.common import monitor, preprocessing
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
@@ -111,6 +112,8 @@ def make_vec_env(
         return DummyVecEnv(env_fns)
 
 
+# TODO(adam): this is a very simple function; convenient given how Sacred config
+# currently works, but we should maybe refactor to avoid needing that.
 def init_rl(
     env: Union[gym.Env, VecEnv],
     model_class: Type[BaseAlgorithm] = stable_baselines3.PPO,
@@ -130,17 +133,8 @@ def init_rl(
     Returns:
       An RL algorithm.
     """
-    # FIXME(sam): verbose=1 and tensorboard_log=None is a hack to prevent SB3
-    # from reconfiguring the logger after we've already configured it. Should
-    # remove once SB3 issue #109 is fixed (there are also >=2 other comments to
-    # this effect elsewhere; worth grepping for "#109").
-    all_kwargs = {
-        "verbose": 1,
-        "tensorboard_log": None,
-    }
-    all_kwargs.update(model_kwargs)
     return model_class(
-        policy_class, env, **all_kwargs
+        policy_class, env, **model_kwargs
     )  # pytype: disable=not-instantiable
 
 
@@ -180,3 +174,59 @@ def endless_iter(iterable: Iterable[T]) -> Iterator[T]:
         raise err
 
     return itertools.chain.from_iterable(itertools.repeat(iterable))
+
+
+def torchify_with_space(
+    array: np.ndarray,
+    space: gym.Space,
+    normalize_images: bool = True,
+    device: Optional[th.device] = None,
+) -> th.Tensor:
+    """Converts a `np.ndarray` into `Tensor` corresponding to `space`.
+
+    The shape of the return value may differ from the shape of the input
+    value. For example, if `space` is discrete, then the input should be
+    an 1D array of scalar values, and the output will be encoded as 2D
+    Tensor of one-hot vectors.
+
+    Args:
+        array: An array of observations or actions.
+        space: The space each value in `array` is sampled from.
+        normalize_images: `normalize_images` keyword argument to
+          `preprocessing.preprocess_obs`. If True, then image `array`
+          is normalized so that each element is between 0 and 1.
+        device: Tensor device.
+    """
+    tensor = th.as_tensor(array, device=device)
+    preprocessed = preprocessing.preprocess_obs(
+        tensor,
+        space,
+        # TODO(sam): can I remove "scale" kwarg in DiscrimNet etc.?
+        normalize_images=normalize_images,
+    )
+    return preprocessed
+
+
+def tensor_iter_norm(
+    tensor_iter: Iterable[th.Tensor], ord: Union[int, float] = 2  # noqa: A002
+) -> th.Tensor:
+    """Compute the norm of a big vector that is produced one tensor chunk at a time.
+
+    Args:
+        tensor_iter: an iterable that yields tensors.
+        ord: order of the p-norm (can be any int or float except 0 and NaN).
+
+    Returns:
+        Norm of the concatenated tensors."""
+    if ord == 0:
+        raise ValueError("This function cannot compute p-norms for p=0.")
+    norms = []
+    for tensor in tensor_iter:
+        norms.append(th.norm(tensor.flatten(), p=ord))
+    norm_tensor = th.as_tensor(norms)
+    # Norm of the norms is equal to the norm of the concatenated tensor.
+    # th.norm(norm_tensor) = sum(norm**ord for norm in norm_tensor)**(1/ord)
+    # = sum(sum(x**ord for x in tensor) for tensor in tensor_iter)**(1/ord)
+    # = sum(x**ord for x in tensor for tensor in tensor_iter)**(1/ord)
+    # = th.norm(concatenated tensors)
+    return th.norm(norm_tensor, p=ord)
