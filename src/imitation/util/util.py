@@ -41,6 +41,7 @@ def make_vec_env(
     log_dir: Optional[str] = None,
     max_episode_steps: Optional[int] = None,
     post_wrappers: Optional[Sequence[Callable[[gym.Env, int], gym.Env]]] = None,
+    **kwargs
 ) -> VecEnv:
     """Returns a VecEnv initialized with `n_envs` Envs.
 
@@ -74,7 +75,7 @@ def make_vec_env(
         # registering the custom environment in the scope of `make_vec_env` didn't
         # work. For more discussion and hypotheses on this issue see PR #160:
         # https://github.com/HumanCompatibleAI/imitation/pull/160.
-        env = spec.make()
+        env = spec.make(**kwargs)
 
         # Seed each environment with a different, non-sequential seed for diversity
         # (even if caller is passing us sequentially-assigned base seeds). int() is

@@ -1,6 +1,8 @@
 """Loads CartPole-v1 demonstrations and trains BC, GAIL, and AIRL models on that data.
 """
 
+import os
+
 import pathlib
 import pickle
 import tempfile
@@ -12,8 +14,10 @@ from imitation.algorithms import adversarial, bc
 from imitation.data import rollout
 from imitation.util import logger, util
 
+dirname = os.path.dirname(__file__)
+
 # Load pickled test demonstrations.
-with open("tests/testdata/expert_models/cartpole_0/rollouts/final.pkl", "rb") as f:
+with open(os.path.join(dirname, "../tests/testdata/expert_models/cartpole_0/rollouts/final.pkl"), "rb") as f:
     # This is a list of `imitation.data.types.Trajectory`, where
     # every instance contains observations and actions for a single expert
     # demonstration.
